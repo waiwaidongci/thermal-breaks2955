@@ -36,9 +36,10 @@ docker compose exec -T backend python -m scripts.seed_demo
 4. 在“分段配置”预先设 min_size=12、max_segments=8、当前罚项 β=80，路径 `[0,20,80,320,1280]`，建立研究。
 5. 真实队列执行精确 DP。结果显示段区间 1–90、91–200、201–300；断点 90 表示第 90 个点仍在左段，第 91 点开始右段。
 6. 展开各预设罚项的段数、断点和目标，并对照相邻段均值差。路径反映参数选择敏感性，不能当断点置信区间。
-7. 到“巡查审阅”选择成功运行，提交包含全部分段快照的巡查假设和现场核对行动，不认定波动原因。
-8. 负责人赵砚登录确认或退回；巡查观察员吴川只能下载已确认 CSV。导出含指纹、均温、RSS、区间与人工意见。
-9. 在“研究留痕”核对导入、点修订、任务、审阅和导出记录；HTTP 响应含 X-Request-ID。
+7. 在“完整稳定区间”表选择任意段数区间核对断点、均温和端目标；切换只读取本次运行已存快照，不重新求解、不发起请求。区间覆盖全部 β≥0，从未最优的段数不出现；临界值平局归更少段区间。
+8. 到“巡查审阅”选择成功运行，提交包含全部分段快照的巡查假设和现场核对行动，不认定波动原因。
+9. 负责人赵砚登录确认或退回；巡查观察员吴川只能下载已确认 CSV。导出含指纹、均温、RSS、区间与人工意见。
+10. 在“研究留痕”核对导入、点修订、任务、审阅和导出记录；HTTP 响应含 X-Request-ID。
 
 ## 算法、坐标和失败态
 
@@ -46,7 +47,9 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 选择目标 `D[K,N]+β*(K-1)`；首段不受罚，β 的单位与 RSS 一样是温度平方。给定多个预先输入的 β（以及当前 β），复用同一个 DP 的最优 RSS frontier，不为每个 β 重建 DP。结果保存 dp_builds=1、每个 K 的最优 RSS 和所有路径分段。时间复杂度 O(Kmax N²)，状态 O(Kmax N)。
 
-累计成本先减去首个观测，再除以最大中心化绝对偏差，在 NumPy longdouble 中累计一、二阶矩；均值、RSS 和罚项目标换回原单位。零方差的 scale 取1，恒温合法，β=0 也选择一段。中心化/缩放防止大偏移小方差的直接相减消去，但不能恢复输入 double 已经丢失的精度。
+完整稳定区间不再只比较预设罚项：把每个可行段数 K 视为直线 `L_K(β)=rss_K+β*(K-1)`，在 β≥0 上求这些直线的下包络，得到每个会成为最优的段数及其完整区间（左闭，右端为与相邻段数的临界值，最后一段上界为无穷）。实现把点 `(x=K-1, y=rss_K)` 按斜率递增插入凸包，维护相邻交点严格递减；新交点不小于前一交点时弹出中点，于是从未唯一最优的段数被直接跳过，共线/近共线（相对 64×longdouble eps 容差）也按少段优先剔除。区间按 β 升序输出、首尾相接覆盖 `[0,∞)`，段数随 β 增大递减；边界平局归更少段区间。每个区间一次性带回该段数的断点、分段均温、RSS、相邻均值差和两端目标，结果页切换区间只读取这份已存快照，不重建 DP、不重新求解。恒温数据所有 K>1 的 RSS 为 0，包络塌缩为仅 K=1 的单一区间；β=0 时在可行段数内取 RSS 最小的最多段（目标相同再取更少段）；窄至 longdouble 可分辨的区间（约 1e-17 量级）也会完整保留。历史运行结果若没有 `penalty_stability` 字段，结果页回退为只展示预设罚项路径，原研究、分段与巡查说明照常查看。
+
+累计成本先减去首个观测，再除以最大中心化绝对偏差，在 NumPy longdouble 中累计一、二阶矩；均值、RSS 和罚项目标换回原单位。零方差的 scale 取1，恒温合法；恒温时任意段数 RSS 均为 0，平局少段优先故恒为一段。β=0 时罚项为零，在可行段数内选 RSS 最小的最多段，目标相同再按少段优先。中心化/缩放防止大偏移小方差的直接相减消去，但不能恢复输入 double 已经丢失的精度。
 
 平局使用相对 64×longdouble eps 的舍入容差。总目标相同优先更少段；固定 K 在相同数值成本时取更早的最后前切点，递归沿用这一规则。没有随机切点。longdouble 精度依平台变化，本次容器为33位精度。精确指动态规划遍历全部可行状态，而非声称无限精度算术。
 
@@ -65,9 +68,9 @@ docker compose exec -T backend python -m scripts.seed_demo
 |计算|NumPy longdouble，精确DP和单frontier罚项路径，Celery5.4/Kombu5.4.2|
 |存储|PostgreSQL16 / Redis7，五实体、User和AuditLog|
 
-75 个有职责的 Python/TS/TSX/CSS 文件，不含空包、依赖或构建产物。五个业务实体为 ThermalBatch → TemperaturePoint → SegmentationRun → Segment → InspectionNote，贯穿 ORM、schema、服务、路由、前端API/store和六个业务页面。后端 `src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}`；前端 `src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`。
+86 个有职责的 Python/TS/TSX/CSS 文件，不含空包、依赖或构建产物。五个业务实体为 ThermalBatch → TemperaturePoint → SegmentationRun → Segment → InspectionNote，贯穿 ORM、schema、服务、路由、前端API/store和六个业务页面。后端 `src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}`；前端 `src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`。
 
-共享枚举 Role、RunStatus、NoteStatus 位于后端 `src/constants/enums.py` 与前端 `src/constants/enums.ts`。RequestID/Error 两个中间件负责追踪与统一错误；ThermalChart、RunSummary、RunTable 在多页复用，另有 PenaltyPath、SegmentTable 和 common 组件。useAsync/useHash 与 format 工具处理交互和格式。说明冻结 segment_snapshot，底稿修订不能改写已批准导出。
+共享枚举 Role、RunStatus、NoteStatus 位于后端 `src/constants/enums.py` 与前端 `src/constants/enums.ts`。RequestID/Error 两个中间件负责追踪与统一错误；ThermalChart、RunSummary、RunTable 在多页复用，另有 PenaltyPath、StableIntervals、SegmentTable 和 common 组件。useAsync/useHash 与 format 工具处理交互和格式。说明冻结 segment_snapshot，底稿修订不能改写已批准导出。
 
 本地前端开发 `cd frontend && npm ci && npm run dev`；`npm run build` 执行 tsc 和 Vite。后端安装 requirements.txt，设置 DATABASE_URL/REDIS_URL/JWT_SECRET 后运行 uvicorn；数据库须先就绪。迁移目录提供初始表结构说明，当前使用 ORM metadata 创建表，没有生产版本迁移链。许可证见 LICENSE（MIT）。
 
